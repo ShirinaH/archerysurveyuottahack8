@@ -1,21 +1,35 @@
 from dotenv import load_dotenv
 import os
+import json
+import time
+import math
+from typing import List, Optional
 
-load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
+from openai import OpenAI
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
-import time
-import math
+
+# -----------------------------
+# Env / AI Client
+# -----------------------------
+
+load_dotenv()
+
+SURVEYMONKEY_OPENAI_API_KEY = os.getenv("SURVEYMONKEY_OPENAI_API_KEY")
+
+if not SURVEYMONKEY_OPENAI_API_KEY:
+    raise RuntimeError("Missing SURVEYMONKEY_OPENAI_API_KEY")
+
+client = OpenAI(api_key=SURVEYMONKEY_OPENAI_API_KEY)
+
+
+# -----------------------------
+# App
+# -----------------------------
 
 app = FastAPI(title="Adaptive Survey Backend")
 
-# -----------------------------
-# CORS
-# -----------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -39,6 +53,10 @@ class Turn(BaseModel):
     answer: Optional[str]
     skipped: bool
     createdAt: int
+
+    # ✅ AI sentiment fields (added)
+    sentimentCategory: Optional[int] = None
+    sentimentConfidence: Optional[float] = None
 
 
 class ImportQuestionsRequest(BaseModel):
@@ -66,9 +84,110 @@ class NextQuestionResponse(BaseModel):
 
 sessions = {}
 
+# -----------------------------
+# AI SENTIMENT INTELLIGENCE
+# -----------------------------
+
+SENTIMENT_LABELS = {
+    1: "terrible experience at the hackathon",
+    2: "bad experience at the hackathon",
+    3: "neutral experience at the hackathon",
+    4: "good experience at the hackathon",
+    5: "excellent experience at the hackathon",
+}
+
+
+def ai_infer_sentiment(answer: str) -> tuple[int, float]:
+    """
+    Uses AI to classify sentiment into 1–5 categories.
+    NO hardcoding.
+    """
+    if not answer:
+        return 3, 0.2
+
+    prompt = f"""
+You are an AI survey analyst.
+
+Classify the user's sentiment into ONE category:
+
+1 = terrible experience at the hackathon
+2 = bad experience at the hackathon
+3 = neutral experience at the hackathon
+4 = good experience at the hackathon
+5 = excellent experience at the hackathon
+
+Return ONLY valid JSON in this format:
+{{ "category": number, "confidence": number }}
+
+User response:
+"{answer}"
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+    )
+
+    data = json.loads(response.choices[0].message.content)
+    return int(data["category"]), float(data["confidence"])
+
+
+def sentiment_distribution(turns: List[Turn]) -> dict:
+    dist = {i: 0 for i in range(1, 6)}
+    for t in turns:
+        if t.sentimentCategory:
+            dist[t.sentimentCategory] += 1
+    return dist
+
+
+def compute_certainty(turns: List[Turn]) -> float:
+    valid = [
+        t for t in turns
+        if t.sentimentCategory is not None and not t.skipped
+    ]
+
+    if len(valid) < 2:
+        return 0.2
+
+    # Distribution
+    dist = sentiment_distribution(valid)
+    total = sum(dist.values())
+    dominant_count = max(dist.values())
+
+    # Agreement score (0–1)
+    agreement = dominant_count / total
+
+    # Confidence bonus from AI
+    avg_conf = sum(
+        t.sentimentConfidence or 0.5 for t in valid
+    ) / len(valid)
+
+    # Volume bonus caps at ~20 questions
+    volume_bonus = min(1.0, len(valid) / 20)
+
+    certainty = agreement * avg_conf * volume_bonus
+    return round(min(certainty, 1.0), 3)
+
+
+
+
+def should_stop(turns: List[Turn], certainty: float) -> bool:
+    valid = [t for t in turns if t.sentimentCategory and not t.skipped]
+    if len(valid) < 5:
+        return False
+
+    if certainty >= 0.8:
+        return True
+
+    if len(valid) >= 20:
+        return True
+
+    return False
+
 
 # -----------------------------
-# AI LOGIC (HEURISTIC, MODEL-AGNOSTIC)
+# QUESTION SELECTION (UNCHANGED)
 # -----------------------------
 
 GENERALITY_KEYWORDS = [
@@ -81,59 +200,6 @@ GENERALITY_KEYWORDS = [
     "how did you feel",
 ]
 
-NEGATIVE_CUES = ["bad", "confusing", "frustrating", "slow", "unclear", "broken"]
-POSITIVE_CUES = ["good", "great", "smooth", "clear", "helpful", "enjoyed"]
-
-
-def sentiment_strength(text: str) -> float:
-    """
-    Estimate how strong / opinionated an answer is.
-    """
-    if not text:
-        return 0.0
-
-    text = text.lower()
-    score = 0
-
-    for w in NEGATIVE_CUES:
-        if w in text:
-            score += 1
-
-    for w in POSITIVE_CUES:
-        if w in text:
-            score += 1
-
-    length_bonus = min(len(text) / 120, 1.0)
-    return min(1.0, 0.4 * score + 0.6 * length_bonus)
-
-
-def compute_certainty(turns: List[Turn]) -> float:
-    """
-    Certainty increases when:
-    - answers are strong (opinionated)
-    - answers are consistent (low spread)
-    """
-    if not turns:
-        return 0.05
-
-    strengths = [
-        sentiment_strength(t.answer)
-        for t in turns
-        if t.answer and not t.skipped
-    ]
-
-    if not strengths:
-        return 0.1
-
-    avg_strength = sum(strengths) / len(strengths)
-
-    # Penalize inconsistency (spread)
-    variance = sum((s - avg_strength) ** 2 for s in strengths) / len(strengths)
-    spread_penalty = math.exp(-variance * 6)
-
-    certainty = avg_strength * spread_penalty
-    return round(min(1.0, certainty), 3)
-
 
 def is_general_question(q: Question) -> bool:
     text = q.text.lower()
@@ -141,44 +207,25 @@ def is_general_question(q: Question) -> bool:
 
 
 def information_gain(q: Question, turns: List[Turn]) -> float:
-    """
-    Heuristic expected information gain:
-    - prefer unasked
-    - prefer questions different from previous ones
-    """
     asked_ids = {t.questionId for t in turns}
     if q.id in asked_ids:
         return -1
-
-    diversity_bonus = 1.0
-    for t in turns:
-        if q.text[:25].lower() in t.questionText.lower():
-            diversity_bonus -= 0.5
-
-    return diversity_bonus
+    return 1.0
 
 
 def choose_initial_question(questions: List[Question]) -> Question:
-    """
-    AI chooses the most general starting question.
-    """
     general = [q for q in questions if is_general_question(q)]
     return general[0] if general else questions[0]
 
 
-def choose_next_question(questions: List[Question], turns: List[Turn]) -> Optional[Question]:
-    """
-    AI chooses the question that reduces uncertainty the most.
-    """
-    scored = [
-        (information_gain(q, turns), q)
-        for q in questions
-    ]
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    best_score, best_q = scored[0]
-
-    return best_q if best_score > 0 else None
+def choose_next_question(
+    questions: List[Question],
+    turns: List[Turn]
+) -> Optional[Question]:
+    for q in questions:
+        if q.id not in {t.questionId for t in turns}:
+            return q
+    return None
 
 
 # -----------------------------
@@ -202,22 +249,32 @@ def import_questions(req: ImportQuestionsRequest):
 @app.post("/next-question", response_model=NextQuestionResponse)
 def next_question(req: NextQuestionRequest):
     session = sessions.get(req.session_id)
+
+    # 🔥 AI sentiment classification for latest answer
+    latest = req.turn
+    if latest.answer and not latest.skipped:
+        cat, conf = ai_infer_sentiment(latest.answer)
+        latest.sentimentCategory = cat
+        latest.sentimentConfidence = conf
+
     certainty = compute_certainty(req.turns)
     value_score = int(certainty * 100)
 
-    # Stop if confident
-    if certainty >= 0.9:
+    # ✅ Stop condition based on sentiment convergence
+    if should_stop(req.turns, certainty):
+        dist = sentiment_distribution(req.turns)
+        dominant = max(dist, key=dist.get)
+
         return NextQuestionResponse(
             certainty=certainty,
             valueScore=value_score,
-            tags=["bullseye"],
+            tags=[SENTIMENT_LABELS[dominant]],
             isDone=True,
         )
 
     if session:
         questions = session["questions"]
 
-        # First question (AI-chosen)
         if not req.turns:
             q = choose_initial_question(questions)
             return NextQuestionResponse(
@@ -228,7 +285,6 @@ def next_question(req: NextQuestionRequest):
                 isDone=False,
             )
 
-        # Adaptive next question
         q = choose_next_question(questions, req.turns)
         if q:
             return NextQuestionResponse(
@@ -239,7 +295,6 @@ def next_question(req: NextQuestionRequest):
                 isDone=False,
             )
 
-    # Fallback
     return NextQuestionResponse(
         certainty=certainty,
         valueScore=value_score,
