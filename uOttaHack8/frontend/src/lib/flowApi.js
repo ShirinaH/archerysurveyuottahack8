@@ -1,28 +1,20 @@
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
-/**
- * Import questions into backend session
- */
 export async function importQuestions(sessionId, questions) {
   const res = await fetch(`${API_BASE}/import-questions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      session_id: sessionId,
-      questions,
-    }),
+    body: JSON.stringify({ session_id: sessionId, questions }),
   });
 
   if (!res.ok) {
-    throw new Error("Failed to import questions");
+    const text = await res.text();
+    throw new Error(text || "import-questions failed");
   }
 
   return res.json();
 }
 
-/**
- * Ask backend for next adaptive question
- */
 export async function getNextTurn({ sessionId, turn, turns }) {
   const res = await fetch(`${API_BASE}/next-question`, {
     method: "POST",
@@ -30,12 +22,13 @@ export async function getNextTurn({ sessionId, turn, turns }) {
     body: JSON.stringify({
       session_id: sessionId,
       turn,
-      turns,
+      turns, // IMPORTANT: full history
     }),
   });
 
   if (!res.ok) {
-    throw new Error("Failed to fetch next question");
+    const text = await res.text();
+    throw new Error(text || "next-question failed");
   }
 
   return res.json();

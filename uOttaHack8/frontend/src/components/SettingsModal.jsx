@@ -1,9 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
-export default function SettingsModal({ isOpen, onClose }) {
+export default function SettingsModal({ isOpen, onClose, onSaveSettings }) {
   const [questions, setQuestions] = useState([]);
   const [error, setError] = useState(null);
+  const [questionLimit, setQuestionLimit] = useState(100);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setError(null);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -17,8 +23,8 @@ export default function SettingsModal({ isOpen, onClose }) {
 
     const reader = new FileReader();
     reader.onload = (e) => {
-      const parsed = e.target.result
-        .split("\n")
+      const parsed = String(e.target.result)
+        .split(/\r?\n/)
         .map((l) => l.trim())
         .filter(Boolean);
 
@@ -29,10 +35,11 @@ export default function SettingsModal({ isOpen, onClose }) {
     reader.readAsText(file);
   }
 
+  const limited = questions.slice(0, Math.max(1, Math.min(100, Number(questionLimit) || 100)));
+
   return createPortal(
     <div style={styles.backdrop} onClick={onClose}>
       <div style={styles.wrap} onClick={(e) => e.stopPropagation()}>
-        {/* Header */}
         <div style={styles.header}>
           <div style={{ fontWeight: 700 }}>Settings</div>
           <div style={{ fontSize: 12, opacity: 0.6 }}>
@@ -40,75 +47,61 @@ export default function SettingsModal({ isOpen, onClose }) {
           </div>
         </div>
 
-        {/* Import Section */}
         <div style={styles.section}>
-          <div style={styles.sectionTitle}>
-            Import survey questions (.txt)
-          </div>
+          <div style={styles.sectionTitle}>Import survey questions (.txt)</div>
 
           <label style={styles.uploadBox}>
             <input
               type="file"
               accept=".txt"
               hidden
-              onChange={(e) => handleFile(e.target.files[0])}
+              onChange={(e) => handleFile(e.target.files?.[0])}
             />
-            <div style={{ opacity: 0.85 }}>
-              Click to upload or drop a file
-            </div>
+            <div style={{ opacity: 0.85 }}>Click to upload or drop a file</div>
             <div style={styles.muted}>One question per line</div>
           </label>
 
-          {error && (
-            <div style={{ color: "#ff6b6b", fontSize: 12 }}>{error}</div>
-          )}
+          {error && <div style={{ color: "#ff6b6b", fontSize: 12 }}>{error}</div>}
         </div>
 
-        {/* Preview */}
         {questions.length > 0 && (
           <div style={styles.section}>
             <div style={styles.sectionTitle}>
-              Imported ({questions.length})
+              Imported ({questions.length}) — Using ({limited.length})
             </div>
 
             <div style={styles.preview}>
-              {questions.slice(0, 6).map((q, i) => (
+              {limited.slice(0, 6).map((q, i) => (
                 <div key={i} style={styles.previewLine}>
                   {i + 1}. {q}
                 </div>
               ))}
-              {questions.length > 6 && (
-                <div style={styles.muted}>
-                  …and {questions.length - 6} more
-                </div>
+              {limited.length > 6 && (
+                <div style={styles.muted}>…and {limited.length - 6} more</div>
               )}
             </div>
           </div>
         )}
 
-        {/* Toggles */}
         <div style={styles.section}>
-          <div style={styles.row}>
-            <span>Enable adaptive questions</span>
-            <input type="checkbox" />
-          </div>
-
           <div style={styles.row}>
             <span>Question Limit</span>
             <input
-                type="number"
-                min={1}
-                max={100}
-                style={styles.smallInput}
+              type="number"
+              min={1}
+              max={100}
+              value={questionLimit}
+              onChange={(e) => setQuestionLimit(e.target.value)}
+              style={styles.smallInput}
             />
           </div>
         </div>
 
-        {/* Action */}
         <button
           style={styles.save}
+          disabled={limited.length === 0}
           onClick={() => {
-            console.log("Imported questions:", questions);
+            onSaveSettings(limited, Number(questionLimit) || 100);
             onClose();
           }}
         >
@@ -119,10 +112,6 @@ export default function SettingsModal({ isOpen, onClose }) {
     document.getElementById("modal-root")
   );
 }
-
-/* =======================
-   Styles (Debug-style)
-======================= */
 
 const styles = {
   backdrop: {
@@ -184,6 +173,15 @@ const styles = {
     marginBottom: 8,
     opacity: 0.85,
   },
+  smallInput: {
+    width: 90,
+    borderRadius: 8,
+    border: "1px solid rgba(255,255,255,0.2)",
+    background: "rgba(255,255,255,0.08)",
+    color: "white",
+    padding: "6px 8px",
+    outline: "none",
+  },
   muted: {
     fontSize: 11,
     opacity: 0.55,
@@ -198,5 +196,6 @@ const styles = {
     fontWeight: 700,
     cursor: "pointer",
     border: "none",
+    opacity: 1,
   },
 };
