@@ -5,6 +5,8 @@ import DebugPanel from "./components/DebugPanel";
 import ArcherStage from "./components/ArcherStage";
 import SettingsModal from "./components/SettingsModal";
 import { getNextTurn, importQuestions } from "./lib/flowApi";
+import bg from "./assets/bg1.png";
+import "./index.css";
 
 export default function App() {
   // Stable per tab/session
@@ -191,12 +193,12 @@ const styles = {
   root: {
     width: "100vw",
     height: "100vh",
-    background: "#0a0a0a",
-    color: "white",
     display: "flex",
     flexDirection: "column",
-    overflow: "hidden",
-    position: "relative",
+    backgroundImage: `url(${bg})`,
+    backgroundSize: "cover",
+    backgroundPosition: "center",
+    backgroundRepeat: "no-repeat",
   },
   done: {
     padding: 16,
